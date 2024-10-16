@@ -1,0 +1,67 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/bionic64"
+  config.vm.network "forwarded_port", guest: 80, host: 8080
+  config.vm.network "forwarded_port", guest: 443, host: 8443
+
+  config.vm.boot_timeout = 600
+
+  config.vm.provision "shell", inline: <<-SHELL
+    sudo apt-get update
+    sudo apt-get install -y python3 python3-pip nginx
+    pip3 install --upgrade setuptools
+    pip3 install flask gunicorn
+
+    sudo mkdir /etc/nginx/ssl
+    sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/nginx/ssl/nginx.key -out /etc/nginx/ssl/nginx.crt -subj "/C=US/ST=State/L=City/O=Organization/OU=Organizational Unit/CN=local.qualentum.org"
+
+    sudo cat > /etc/nginx/sites-available/flask_app <<EOF
+server {
+    listen 80;
+    server_name local.qualentum.org;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name local.qualentum.org;
+
+    ssl_certificate /etc/nginx/ssl/nginx.crt;
+    ssl_certificate_key /etc/nginx/ssl/nginx.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;  # Assuming your Gunicorn is running on port 8000
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+    sudo sed -i 's/proxy_set_header Host $host;/proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;/' /etc/nginx/sites-available/flask_app
+
+    sudo ln -s /etc/nginx/sites-available/flask_app /etc/nginx/sites-enabled/
+    sudo nginx -t
+    sudo systemctl restart nginx
+
+    sudo bash -c 'cat <<EOF > /etc/systemd/system/flask_app.service
+[Unit]
+Description=Gunicorn instance to serve Flask application
+After=network.target
+
+[Service]
+User=vagrant
+Group=www-data
+WorkingDirectory=/vagrant
+ExecStart=/usr/local/bin/gunicorn -w 4 app:app -b 127.0.0.1:8000
+
+[Install]
+WantedBy=multi-user.target
+EOF'
+
+    sudo systemctl enable flask_app
+    sudo systemctl start flask_app
+  SHELL
+end
